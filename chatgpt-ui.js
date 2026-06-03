@@ -437,20 +437,31 @@
       const { id, icon, label, onClick } = options;
 
       const observer = new MutationObserver(() => {
-        const popup = document.querySelector('.aria-live\\=polite.fixed');
+        // Late-2026 the selection popup switched from position:fixed to a
+        // translate3d'd absolute container (the "Create Note" rollout). The
+        // .aria-live=polite class (literal '=', tailwind arbitrary class)
+        // is still the stable handle; the .fixed filter no longer matches.
+        // Tighten the inner selector to .shadow-long.flex.overflow-hidden
+        // so we don't accidentally grab any other .flex.overflow-hidden.
+        const popup = document.querySelector('.aria-live\\=polite');
         if (!popup) return;
-        const container = popup.querySelector('.flex.overflow-hidden');
+        const container = popup.querySelector('.shadow-long.flex.overflow-hidden');
         if (!container) return;
         if (container.querySelector(`[data-cgq-id="${id}"]`)) return;
 
         const btn = document.createElement('button');
         btn.dataset.cgqId = id;
-        btn.className = 'btn relative btn-secondary shadow-long flex rounded-xl border-none active:opacity-1';
+        // Mirror native popup buttons — radius lives on the wrapper, each
+        // button is rounded-none with a left border acting as the separator
+        // from its left neighbour.
+        btn.className =
+          'btn relative btn-secondary rounded-none active:opacity-1 '
+          + 'border-y-0 border-e-0 border-s border-solid border-token-border-heavy';
         btn.innerHTML = `
           <div class="flex items-center justify-center">
             <span class="flex items-center gap-1.5 select-none">
-              <span style="font-size: 16px;">${icon}</span>
-              <span class="whitespace-nowrap! select-none max-md:sr-only">${label}</span>
+              <span style="font-size: 14px;">${icon}</span>
+              <span class="whitespace-nowrap select-none">${label}</span>
             </span>
           </div>
         `;
