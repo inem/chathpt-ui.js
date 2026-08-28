@@ -876,22 +876,54 @@
     // ============================================
 
     _getComposerRoot() {
-      return document.querySelector('[data-testid="composer"]')
-        || document.querySelector('form[data-type="unified-composer"]')
-        || document.querySelector('form textarea')?.closest('form')
-        || document.querySelector('textarea[aria-label], textarea[placeholder]')?.closest('form')
-        || document.querySelector('[contenteditable="true"][role="textbox"]')?.closest('form')
-        || document.querySelector('form');
+      const explicitRoot = document.querySelector('[data-testid="composer"]')
+        || document.querySelector('form[data-type="unified-composer"]');
+      if (explicitRoot) return explicitRoot;
+
+      const field = this._getComposerField(document);
+      return this._getOwningForm(field) || document.querySelector('form');
+    },
+
+    _isUsableComposerField(field) {
+      if (!field || field.hidden || field.disabled) return false;
+      if (field.getAttribute?.('aria-hidden') === 'true') return false;
+      if (field.getAttribute?.('aria-disabled') === 'true') return false;
+
+      const style = window.getComputedStyle?.(field);
+      if (style && (style.display === 'none' || style.visibility === 'hidden')) return false;
+
+      if (typeof field.getBoundingClientRect === 'function') {
+        const rect = field.getBoundingClientRect();
+        if (rect && rect.width === 0 && rect.height === 0) return false;
+      }
+      return true;
     },
 
     _getComposerField(root) {
       const scope = root || document;
-      return scope.querySelector('textarea[data-testid]')
-        || scope.querySelector('textarea[aria-label]')
-        || scope.querySelector('textarea[placeholder]')
-        || scope.querySelector('[contenteditable="true"][data-testid]')
-        || scope.querySelector('[contenteditable="true"][role="textbox"]')
-        || scope.querySelector('[contenteditable="true"][aria-label]');
+      const selectors = [
+        '#prompt-textarea[contenteditable="true"]',
+        '[contenteditable="true"][data-testid]',
+        '[contenteditable="true"][role="textbox"]',
+        '[contenteditable="true"][aria-label]',
+        'textarea[data-testid]',
+        'textarea[aria-label]',
+        'textarea[placeholder]',
+      ];
+      const candidates = [];
+      const seen = new Set();
+
+      for (const selector of selectors) {
+        for (const field of scope.querySelectorAll(selector)) {
+          if (seen.has(field)) continue;
+          seen.add(field);
+          candidates.push(field);
+        }
+      }
+
+      return candidates.find(field => this._isUsableComposerField(field))
+        || candidates.find(field => !field.disabled && field.getAttribute?.('aria-disabled') !== 'true')
+        || null;
     },
 
     _getOwningForm(node) {

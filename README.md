@@ -30,6 +30,18 @@ Designed for content scripts running in `MAIN` world — no ES modules, no build
 - `ChatGPTUI.onNewMessage(callback)` — fires when new messages appear
 - `ChatGPTUI.onSidebarChange(callback)` — fires on sidebar DOM changes
 
+### Composer & Responses
+- `ChatGPTUI.setComposerText(text)` — fill and focus the active visible composer
+- `ChatGPTUI.getComposerText()` — read the active visible composer
+- `ChatGPTUI.waitForComposerReady(options)` — await stable text and an enabled Send control
+- `ChatGPTUI.submitComposer()` — click the enabled Send control once
+- `ChatGPTUI.submitComposerWhenReady(options)` — await readiness, submit once, and verify it started
+- `ChatGPTUI.waitForAssistantResponse(options)` — await a completed assistant message
+
+Composer resolution deliberately prefers a visible semantic editor such as
+`#prompt-textarea[contenteditable="true"]`. Hidden textarea accessibility mirrors
+are ignored while a usable editor exists.
+
 ### Utilities
 - `ChatGPTUI.getConversationTitle()` — current chat title
 - `ChatGPTUI.getConversationUrl()` — current chat URL
@@ -61,3 +73,8 @@ ChatGPTUI.addTopHeaderButton({
 });
 ```
 
+Run the dependency-free contract tests with:
+
+```sh
+node --test chatgpt-ui.test.js
+```
