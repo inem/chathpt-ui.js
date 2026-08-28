@@ -11,6 +11,12 @@
  * - addHeaderButton(options) - add button to top header area
  * - addTopHeaderButton(options) - add button next to Share
  * - addChatBadge(chatEl, count) - add badge to sidebar chat item
+ * - setComposerText(text) - set the current composer text and focus it
+ * - getComposerText() - get the current composer text
+ * - waitForComposerReady(options) - wait until composer text and Send readiness are stable
+ * - submitComposer() - click the enabled send control for the current composer
+ * - submitComposerWhenReady(options) - wait for stable composer readiness, click once, and verify submit started
+ * - waitForAssistantResponse(options) - wait for a new assistant message to finish streaming
  * - showToast(text, options) - show fixed toast notification
  * - onNewMessage(callback) - observe new messages
  * - onSidebarChange(callback) - observe sidebar changes
@@ -31,6 +37,7 @@
       sidebar: 'nav[aria-label="Chat history"]',
       chatList: 'nav ol, nav ul',
       chatItem: 'nav li a[href^="/c/"]',
+      stopGeneratingButton: '[data-testid="stop-button"], button[aria-label="Stop generating"], button[aria-label="Stop streaming"], button[aria-label="Stop response"]',
     },
 
     // ============================================
@@ -423,9 +430,16 @@
         });
       }
 
+      // ChatGPT wraps share-chat-button in nested divs now, so it's not a
+      // direct child of actionsContainer — insertBefore(btn, shareBtn) would
+      // throw NotFoundError. Walk up to the direct child that contains it.
       const shareBtn = actionsContainer.querySelector('[data-testid="share-chat-button"]');
-      if (shareBtn) {
-        actionsContainer.insertBefore(btn, shareBtn);
+      let anchor = shareBtn;
+      while (anchor && anchor.parentNode !== actionsContainer) {
+        anchor = anchor.parentNode;
+      }
+      if (anchor) {
+        actionsContainer.insertBefore(btn, anchor);
       } else {
         actionsContainer.insertBefore(btn, actionsContainer.firstChild);
       }
@@ -738,6 +752,10 @@
       return document.querySelectorAll(this.selectors.assistantMessage);
     },
 
+    isGenerating() {
+      return !!document.querySelector(this.selectors.stopGeneratingButton);
+    },
+
     getConversationTitle() {
       return document.title?.replace(' | ChatGPT', '').replace(' - ChatGPT', '') || 'Untitled';
     },
@@ -761,6 +779,447 @@
         text: markdownEl?.textContent || messageEl.textContent || '',
         html: markdownEl?.innerHTML || messageEl.innerHTML || '',
       };
+    },
+
+    waitForAssistantResponse(options = {}) {
+      const {
+        afterCount = this.getAssistantMessages().length,
+        timeout = 1800000,
+        quietPeriod = 2000,
+      } = options;
+
+      return new Promise((resolve) => {
+        let observer = null;
+        let intervalId = null;
+        let timeoutId = null;
+        let settled = false;
+        let candidateEl = null;
+        let candidateText = '';
+        let stableSince = 0;
+
+        const cleanup = () => {
+          if (observer) {
+            observer.disconnect();
+            observer = null;
+          }
+          if (intervalId) {
+            clearInterval(intervalId);
+            intervalId = null;
+          }
+          if (timeoutId) {
+            clearTimeout(timeoutId);
+            timeoutId = null;
+          }
+        };
+
+        const finish = (result) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          resolve(result);
+        };
+
+        const inspect = () => {
+          if (settled) return;
+
+          const messages = Array.from(this.getAssistantMessages());
+          const message = messages[afterCount] || null;
+          if (!message) {
+            candidateEl = null;
+            candidateText = '';
+            stableSince = 0;
+            return;
+          }
+
+          const { text } = this.getMessageContent(message);
+          const normalizedText = text.trim();
+          if (!normalizedText || this.isGenerating()) {
+            candidateEl = message;
+            candidateText = normalizedText;
+            stableSince = 0;
+            return;
+          }
+
+          if (candidateEl !== message || candidateText !== normalizedText) {
+            candidateEl = message;
+            candidateText = normalizedText;
+            stableSince = Date.now();
+            return;
+          }
+
+          if (!stableSince) {
+            stableSince = Date.now();
+            return;
+          }
+
+          if (stableSince && Date.now() - stableSince >= quietPeriod) {
+            finish(message);
+          }
+        };
+
+        observer = new MutationObserver(inspect);
+        observer.observe(document.documentElement, {
+          childList: true,
+          subtree: true,
+          characterData: true,
+          attributes: true,
+        });
+
+        intervalId = setInterval(inspect, 250);
+        timeoutId = setTimeout(() => finish(null), timeout);
+        inspect();
+      });
+    },
+
+    // ============================================
+    // Composer
+    // ============================================
+
+    _getComposerRoot() {
+      return document.querySelector('[data-testid="composer"]')
+        || document.querySelector('form[data-type="unified-composer"]')
+        || document.querySelector('form textarea')?.closest('form')
+        || document.querySelector('textarea[aria-label], textarea[placeholder]')?.closest('form')
+        || document.querySelector('[contenteditable="true"][role="textbox"]')?.closest('form')
+        || document.querySelector('form');
+    },
+
+    _getComposerField(root) {
+      const scope = root || document;
+      return scope.querySelector('textarea[data-testid]')
+        || scope.querySelector('textarea[aria-label]')
+        || scope.querySelector('textarea[placeholder]')
+        || scope.querySelector('[contenteditable="true"][data-testid]')
+        || scope.querySelector('[contenteditable="true"][role="textbox"]')
+        || scope.querySelector('[contenteditable="true"][aria-label]');
+    },
+
+    _getOwningForm(node) {
+      return node?.form || node?.closest?.('form') || null;
+    },
+
+    _getSendButton(root, field = null) {
+      const scope = root || document;
+      const candidates = [
+        'button[data-composer-submit]:not([disabled])',
+        '[data-testid="send-button"]:not([disabled])',
+        'button[aria-label="Send message"]:not([disabled])',
+        'button[aria-label="Send prompt"]:not([disabled])',
+        'button[type="submit"]:not([disabled])',
+        'form button[type="submit"]:not([disabled])',
+        'button[data-testid="fruitjuice-send-button"]:not([disabled])',
+      ];
+      const broadAriaSendSelector = 'button[aria-label*="Send" i]:not([disabled])';
+      try {
+        document.createDocumentFragment().querySelector(broadAriaSendSelector);
+        candidates.push(broadAriaSendSelector);
+      } catch (_err) {}
+
+      for (const selector of candidates) {
+        const button = scope.querySelector(selector) || document.querySelector(selector);
+        if (button && button.getAttribute('aria-disabled') !== 'true') {
+          return button;
+        }
+      }
+
+      return null;
+    },
+
+    _getUserMessageCount() {
+      return document.querySelectorAll(this.selectors.userMessage).length;
+    },
+
+    _delay(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
+    },
+
+    /**
+     * Set the active composer text and dispatch React-compatible input events
+     * @param {string} text - Text to place into the composer
+     * @returns {boolean}
+     */
+    setComposerText(text) {
+      const root = this._getComposerRoot();
+      const field = this._getComposerField(root);
+      if (!field) return false;
+
+      const value = String(text ?? '');
+      const isTextarea = field.tagName === 'TEXTAREA';
+
+      if (isTextarea) {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
+        if (setter) {
+          setter.call(field, value);
+        } else {
+          field.value = value;
+        }
+      } else {
+        field.textContent = value;
+      }
+
+      field.focus();
+
+      if (!isTextarea) {
+        const selection = window.getSelection?.();
+        if (selection && document.createRange) {
+          const range = document.createRange();
+          range.selectNodeContents(field);
+          range.collapse(false);
+          selection.removeAllRanges();
+          selection.addRange(range);
+        }
+      }
+
+      field.dispatchEvent(new InputEvent('input', {
+        bubbles: true,
+        cancelable: true,
+        data: value,
+        inputType: 'insertText',
+      }));
+      field.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    },
+
+    /**
+     * Get the active composer text
+     * @returns {string}
+     */
+    getComposerText() {
+      const root = this._getComposerRoot();
+      const field = this._getComposerField(root);
+      if (!field) return '';
+      return field.tagName === 'TEXTAREA' ? field.value : (field.textContent || '');
+    },
+
+    /**
+     * Wait until the active composer and enabled send control are stable
+     * @param {Object} options
+     * @param {string} options.expectedText - Required composer text before resolving
+     * @param {number} options.timeout - Max wait in ms (default: 60000)
+     * @param {number} options.quietPeriod - Stable period in ms (default: 750)
+     * @param {number} options.pollInterval - Poll interval in ms (default: 250)
+     * @returns {Promise<boolean>}
+     */
+    waitForComposerReady(options = {}) {
+      const {
+        expectedText,
+        timeout = 60000,
+        quietPeriod = 750,
+        pollInterval = 250,
+      } = options;
+      const hasExpectedText = Object.prototype.hasOwnProperty.call(options, 'expectedText');
+
+      return new Promise((resolve) => {
+        let observer = null;
+        let intervalId = null;
+        let timeoutId = null;
+        let settled = false;
+        let lastSignature = '';
+        let stableSince = 0;
+
+        const cleanup = () => {
+          if (observer) {
+            observer.disconnect();
+            observer = null;
+          }
+          if (intervalId) {
+            clearInterval(intervalId);
+            intervalId = null;
+          }
+          if (timeoutId) {
+            clearTimeout(timeoutId);
+            timeoutId = null;
+          }
+        };
+
+        const finish = (result) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          resolve(result);
+        };
+
+        const inspect = () => {
+          if (settled) return;
+
+          const root = this._getComposerRoot();
+          const field = this._getComposerField(root);
+          const text = field
+            ? (field.tagName === 'TEXTAREA' ? field.value : (field.textContent || ''))
+            : '';
+          const button = this._getSendButton(root, field);
+          const buttonReady = !!button;
+          const textReady = !hasExpectedText || text === String(expectedText ?? '');
+          const ready = !!field && textReady && buttonReady;
+          const signature = [
+            field ? 'field' : 'no-field',
+            text,
+            buttonReady ? 'send-ready' : 'send-not-ready',
+          ].join('\n');
+          const now = Date.now();
+
+          if (!ready) {
+            lastSignature = signature;
+            stableSince = 0;
+            return;
+          }
+
+          if (signature !== lastSignature) {
+            lastSignature = signature;
+            stableSince = now;
+            return;
+          }
+
+          if (!stableSince) {
+            stableSince = now;
+            return;
+          }
+
+          if (now - stableSince >= quietPeriod) {
+            finish(true);
+          }
+        };
+
+        observer = new MutationObserver(inspect);
+        observer.observe(document.documentElement, {
+          childList: true,
+          subtree: true,
+          characterData: true,
+          attributes: true,
+        });
+
+        intervalId = setInterval(inspect, pollInterval);
+        timeoutId = setTimeout(() => finish(false), timeout);
+        inspect();
+      });
+    },
+
+    /**
+     * Submit the active composer by clicking the enabled send control once
+     * @returns {boolean}
+     */
+    submitComposer() {
+      const root = this._getComposerRoot();
+      const field = this._getComposerField(root);
+      const button = this._getSendButton(root, field);
+      if (!button) return false;
+
+      try {
+        button.click();
+        return true;
+      } catch (_err) {
+        return false;
+      }
+    },
+
+    /**
+     * Wait for stable composer readiness, click Send once, and verify submission started
+     * @param {Object} options
+     * @param {string} options.expectedText - Required composer text before submitting
+     * @param {number} options.timeout - Max readiness wait in ms (default: 60000)
+     * @param {number} options.quietPeriod - Stable readiness period in ms (default: 750)
+     * @param {number} options.settleDelay - Delay after first stable readiness before final recheck, using setTimeout (default: 1500)
+     * @param {number} options.pollInterval - Poll interval in ms (default: 250)
+     * @param {number} options.verifyTimeout - Max submit verification wait in ms (default: 15000)
+     * @param {Function} options.onBeforeSubmit - Optional callback just before the one-shot submit
+     * @returns {Promise<boolean>}
+     */
+    async submitComposerWhenReady(options = {}) {
+      const ready = await this.waitForComposerReady(options);
+      if (!ready) return false;
+
+      const {
+        expectedText,
+        pollInterval = 250,
+        quietPeriod = 750,
+        settleDelay = 1500,
+        verifyTimeout = 15000,
+        onBeforeSubmit,
+      } = options;
+      const hasExpectedText = Object.prototype.hasOwnProperty.call(options, 'expectedText');
+      const expected = String(expectedText ?? '');
+
+      if (settleDelay > 0) {
+        await this._delay(settleDelay);
+      }
+
+      const secondQuietPeriod = Math.min(quietPeriod, 500);
+      const secondTimeout = Math.max(2000, secondQuietPeriod + (pollInterval * 3));
+      const readyAfterSettle = await this.waitForComposerReady({
+        ...options,
+        timeout: secondTimeout,
+        quietPeriod: secondQuietPeriod,
+        pollInterval,
+      });
+      if (!readyAfterSettle) return false;
+      if (hasExpectedText && this.getComposerText() !== expected) return false;
+
+      const userMessageCount = this._getUserMessageCount();
+      const composerText = this.getComposerText();
+      if (typeof onBeforeSubmit === 'function') {
+        try {
+          onBeforeSubmit();
+        } catch (_err) {}
+      }
+      const submitted = this.submitComposer();
+      if (!submitted) return false;
+
+      return new Promise((resolve) => {
+        let observer = null;
+        let intervalId = null;
+        let timeoutId = null;
+        let settled = false;
+
+        const cleanup = () => {
+          if (observer) {
+            observer.disconnect();
+            observer = null;
+          }
+          if (intervalId) {
+            clearInterval(intervalId);
+            intervalId = null;
+          }
+          if (timeoutId) {
+            clearTimeout(timeoutId);
+            timeoutId = null;
+          }
+        };
+
+        const finish = (result) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          resolve(result);
+        };
+
+        const inspect = () => {
+          if (settled) return;
+          if (this._getUserMessageCount() > userMessageCount) {
+            finish(true);
+            return;
+          }
+          if (composerText !== '' && this.getComposerText() === '') {
+            finish(true);
+            return;
+          }
+          if (this.isGenerating()) {
+            finish(true);
+            return;
+          }
+        };
+
+        observer = new MutationObserver(inspect);
+        observer.observe(document.documentElement, {
+          childList: true,
+          subtree: true,
+          characterData: true,
+          attributes: true,
+        });
+
+        intervalId = setInterval(inspect, pollInterval);
+        timeoutId = setTimeout(() => finish(false), verifyTimeout);
+        inspect();
+      });
     },
 
     // ============================================
